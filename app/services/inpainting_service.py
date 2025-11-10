@@ -1,136 +1,146 @@
 import os
 import base64
-import requests
+import replicate
+import cv2
+import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple
-import fal_client
 from PIL import Image
 import io
 
 class InpaintingService:
     """
-    Service for object removal using Flux Kontext via FAL AI
+    Service for object removal using LaMa via Replicate
     """
     
-    # OPTION 1: Hardcode your API key here (not recommended for production)
-    HARDCODED_API_KEY = ""  # Set your key here like: "99144ad5-8f12-42c7-ba2e-bb988b8fdbab:3f1aaac07bceb1b6d8d6020029390612"
-    
     def __init__(self):
-        # Load FAL_KEY: First try hardcoded, then environment variable
-        self.fal_key = self.HARDCODED_API_KEY or os.environ.get("FAL_KEY")
-        
-        if not self.fal_key:
+        self.api_token = os.getenv("REPLICATE_API_TOKEN")
+        if not self.api_token:
             print("=" * 60)
-            print("WARNING: FAL_KEY not found!")
-            print("Option 1 - Hardcode in inpainting_service.py:")
-            print("  Set HARDCODED_API_KEY = 'your-key-here'")
-            print("\nOption 2 - PowerShell:")
-            print("  $env:FAL_KEY='your-key-here'")
-            print("  Then restart the server")
-            print("\nOption 3 - Command Prompt (cmd):")
-            print("  set FAL_KEY=your-key-here")
-            print("  Then restart the server")
-            print("\nGet your key from: https://fal.ai/dashboard/keys")
+            print("WARNING: REPLICATE_API_TOKEN not found in environment variables!")
+            print("Set it with: export REPLICATE_API_TOKEN='your-token-here'")
+            print("Get your token from: https://replicate.com/account/api-tokens")
             print("=" * 60)
         else:
-            print(f"✅ FAL_KEY loaded successfully (ends with: ...{self.fal_key[-8:]})")
+            print("=" * 60)
+            print("✅ Replicate API token found!")
+            print("Using LaMa model for inpainting")
+            print("=" * 60)
+    
+    def dilate_mask(self, mask_path: str, dilation_pixels: int = 30) -> str:
+        """
+        Dilate (expand) the mask by the specified number of pixels.
+        
+        Args:
+            mask_path: Path to the mask image
+            dilation_pixels: Number of pixels to expand the mask (default: 30)
+            
+        Returns:
+            Path to the dilated mask
+        """
+        # Load mask
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        
+        # Create a circular kernel for dilation
+        kernel_size = dilation_pixels * 2 + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        
+        # Dilate the mask
+        dilated_mask = cv2.dilate(mask, kernel, iterations=1)
+        
+        # Save dilated mask
+        mask_path_obj = Path(mask_path)
+        dilated_mask_path = str(mask_path_obj.parent / f"dilated_{mask_path_obj.name}")
+        cv2.imwrite(dilated_mask_path, dilated_mask)
+        
+        print(f"Mask dilated by {dilation_pixels} pixels")
+        
+        return dilated_mask_path
     
     def remove_object(
         self,
         image_path: str,
         mask_path: str,
         object_name: str = "object",
-        output_path: Optional[str] = None
+        output_path: Optional[str] = None,
+        **kwargs  # Ignore extra parameters for compatibility
     ) -> Tuple[str, dict]:
         """
-        Remove object from image using Flux Kontext.
+        Remove object from image using LaMa via Replicate.
         
         Args:
             image_path: Path to the input image
             mask_path: Path to the mask image
-            object_name: Name of the object to remove (for prompt)
+            object_name: Name of the object to remove (for logging)
             output_path: Optional path to save the result
         
         Returns:
             Tuple of (output_image_path, result_info)
         """
-        if not self.fal_key:
-            raise Exception("FAL_KEY not set. Please set your FAL API key.")
+        if not self.api_token:
+            raise Exception("REPLICATE_API_TOKEN not set. Please set your Replicate API token.")
         
         try:
+            import time
+            start_time = time.time()
+            
             print("=" * 60)
-            print(f"Removing '{object_name}' from image using Flux Kontext...")
+            print(f"Removing '{object_name}' from image using LaMa...")
             print("=" * 60)
             
-            # Read and encode image
+            # Dilate the mask to expand it by 30 pixels
+            dilated_mask_path = self.dilate_mask(mask_path, dilation_pixels=30)
+            
+            # Load image and dilated mask
             with open(image_path, 'rb') as f:
                 image_data = f.read()
-            image_base64 = base64.b64encode(image_data).decode('utf-8')
-            image_url = f"data:image/png;base64,{image_base64}"
-            
-            # Read and encode mask
-            with open(mask_path, 'rb') as f:
+            with open(dilated_mask_path, 'rb') as f:
                 mask_data = f.read()
+            
+            # Convert to base64
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
             mask_base64 = base64.b64encode(mask_data).decode('utf-8')
-            mask_url = f"data:image/png;base64,{mask_base64}"
             
-            # Create prompt
-            prompt = f"remove {object_name} from the image"
+            # Create data URIs
+            image_uri = f"data:image/png;base64,{image_base64}"
+            mask_uri = f"data:image/png;base64,{mask_base64}"
             
-            print(f"Prompt: '{prompt}'")
-            print("Sending request to FAL AI...")
+            print("Sending request to Replicate LaMa model...")
             
-            # Call FAL API
-            handler = fal_client.submit(
-                "fal-ai/flux-pro/kontext",
-                arguments={
-                    "prompt": prompt,
-                    "image_url": image_url,
-                    # "mask_url": mask_url,
-                    "num_inference_steps": 28,
-                    "guidance_scale": 3.5,
-                    "output_format": "png",
-                    "seed": None  # Random seed for variation
+            # Run LaMa model on Replicate
+            output = replicate.run(
+                "allenhooo/lama:cdac78a1bec5b23c07fd29692fb70baa513ea403a39e643c48ec5edadb15fe72",
+                input={
+                    "image": image_uri,
+                    "mask": mask_uri
                 }
             )
             
-            # Wait for result
-            result = handler.get()
+            # Download the result
+            result_data = output.read()
             
-            print("✅ Inpainting completed!")
+            # Save output
+            if output_path is None:
+                image_path_obj = Path(image_path)
+                output_path = str(image_path_obj.parent / f"result_{image_path_obj.name}")
             
-            # Download the result image
-            if result and 'images' in result and len(result['images']) > 0:
-                result_url = result['images'][0]['url']
-                
-                # Download image
-                response = requests.get(result_url)
-                if response.status_code == 200:
-                    # Save to output path
-                    if output_path is None:
-                        # Generate output path
-                        image_path_obj = Path(image_path)
-                        output_path = str(image_path_obj.parent / f"result_{image_path_obj.name}")
-                    
-                    with open(output_path, 'wb') as f:
-                        f.write(response.content)
-                    
-                    print(f"Result saved to: {output_path}")
-                    
-                    result_info = {
-                        "success": True,
-                        "prompt": prompt,
-                        "object_removed": object_name,
-                        "output_path": output_path,
-                        "seed": result.get('seed'),
-                        "inference_time": result.get('timings', {}).get('inference', 0)
-                    }
-                    
-                    return output_path, result_info
-                else:
-                    raise Exception(f"Failed to download result image: {response.status_code}")
-            else:
-                raise Exception("No images in result")
+            with open(output_path, 'wb') as f:
+                f.write(result_data)
+            
+            inference_time = time.time() - start_time
+            
+            print(f"✅ Inpainting completed in {inference_time:.2f}s")
+            print(f"Result saved to: {output_path}")
+            print("=" * 60)
+            
+            result_info = {
+                "success": True,
+                "object_removed": object_name,
+                "output_path": output_path,
+                "inference_time": inference_time
+            }
+            
+            return output_path, result_info
                 
         except Exception as e:
             print("=" * 60)

@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from app.routers import upload, remove
+from app.routers import upload, remove, sam
 from pathlib import Path
 
 app = FastAPI(title="Object Remover API")
@@ -19,6 +19,7 @@ app.add_middleware(
 # Include routers
 app.include_router(upload.router)
 app.include_router(remove.router)
+app.include_router(sam.router)
 
 @app.get("/health")
 async def health_check():

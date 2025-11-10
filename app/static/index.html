@@ -516,6 +516,9 @@
       <button id="processBtn">🚀 Process Image</button>
       <button id="removeBtn" style="display: none;">✨ Remove Object</button>
       <button id="clearBtn">🗑️ Clear Mask</button>
+      <!-- SAM Interactive Controls -->
+      <button id="addMaskBtn" style="display: none;">➕ Add Mask</button>
+      <button id="deleteMasksBtn" style="display: none;">🗑️ Delete All Masks</button>
     </div>
 
     <div id="status" class="status"></div>
@@ -571,7 +574,7 @@
             <div class="loading-content">
               <div class="spinner"></div>
               <div class="loading-text">Removing Object...</div>
-              <div class="loading-subtext">Flux Kontext is working its magic ✨</div>
+              <div class="loading-subtext">LaMa is working its magic ✨</div>
               <div class="progress-bar">
                 <div class="progress-fill"></div>
               </div>
@@ -631,6 +634,10 @@
     let clickPoints = [];
     let brushSize = 20;
     let lastUploadResult = null; // Store upload result for inpainting
+    let samSessionId = 'default';
+    let samMasks = [];
+    const addMaskBtn = document.getElementById('addMaskBtn');
+    const deleteMasksBtn = document.getElementById('deleteMasksBtn');
 
     // Brush size control
     brushSizeInput.addEventListener('input', (e) => {
@@ -644,6 +651,13 @@
       maskModeBtn.classList.add('active');
       samModeBtn.classList.remove('active');
       yoloModeBtn.classList.remove('active');
+      
+      // Show normal controls
+      processBtn.style.display = 'inline-block';
+      addMaskBtn.style.display = 'none';
+      deleteMasksBtn.style.display = 'none';
+      removeBtn.style.display = 'none';
+      
       showStatus('Brush Mode: Paint over objects to remove', 'info');
       setTimeout(hideStatus, 3000);
     });
@@ -653,7 +667,20 @@
       samModeBtn.classList.add('active');
       maskModeBtn.classList.remove('active');
       yoloModeBtn.classList.remove('active');
-      showStatus('SAM Mode: Click on objects for AI segmentation', 'info');
+      
+      // Show SAM controls, hide process button
+      processBtn.style.display = 'none';
+      addMaskBtn.style.display = 'inline-block';
+      deleteMasksBtn.style.display = 'inline-block';
+      removeBtn.style.display = 'inline-block';
+      removeBtn.textContent = '✨ Process & Remove';
+      
+      // Upload image to SAM if we have one
+      if (currentImage) {
+        uploadToSAM();
+      }
+      
+      showStatus('SAM Interactive Mode: Click to add points, then Add Mask to save', 'info');
       setTimeout(hideStatus, 3000);
     });
 
@@ -662,6 +689,13 @@
       yoloModeBtn.classList.add('active');
       maskModeBtn.classList.remove('active');
       samModeBtn.classList.remove('active');
+      
+      // Show normal controls
+      processBtn.style.display = 'inline-block';
+      addMaskBtn.style.display = 'none';
+      deleteMasksBtn.style.display = 'none';
+      removeBtn.style.display = 'none';
+      
       showStatus('YOLO Mode: Click on objects for instant detection & segmentation', 'info');
       setTimeout(hideStatus, 3000);
     });
@@ -708,6 +742,11 @@
           resultContainer.classList.remove('show');
           hideStatus();
           
+          // If in SAM mode, upload to SAM service
+          if (mode === 'sam') {
+            uploadToSAM();
+          }
+          
           showStatus('Image loaded successfully! Start marking objects to remove.', 'success');
           setTimeout(hideStatus, 3000);
         };
@@ -741,12 +780,15 @@
       if (mode === 'mask') {
         // Start drawing immediately
         draw(e);
+      } else if (mode === 'sam') {
+        // SAM interactive mode - send point to backend
+        addSAMPoint(Math.round(x), Math.round(y));
       } else {
-        // For SAM/YOLO mode, record point
+        // For YOLO mode, record point
         clickPoints.push({x: Math.round(x), y: Math.round(y)});
         
         // Draw a marker to indicate click
-        const markerColor = mode === 'yolo' ? '#10b981' : '#667eea'; // Green for YOLO, Purple for SAM
+        const markerColor = '#10b981'; // Green for YOLO
         
         // Outer circle
         ctx.beginPath();
@@ -769,8 +811,7 @@
         ctx.strokeText(clickPoints.length.toString(), x + 12, y - 8);
         ctx.fillText(clickPoints.length.toString(), x + 12, y - 8);
         
-        const modeName = mode === 'yolo' ? 'YOLO' : 'SAM';
-        showStatus(`Point ${clickPoints.length} added. Click more points or process for ${modeName} segmentation.`, 'info');
+        showStatus(`Point ${clickPoints.length} added. Click more points or process for YOLO segmentation.`, 'info');
       }
     }
 
@@ -816,16 +857,21 @@
     clearBtn.addEventListener('click', () => {
       if (!currentImage) return;
       
-      // Redraw original image
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(currentImage, 0, 0);
-      
-      // Clear mask canvas and points
-      maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
-      clickPoints = [];
-      
-      showStatus('Mask cleared. Start over!', 'info');
-      setTimeout(hideStatus, 2000);
+      if (mode === 'sam') {
+        // Clear SAM clicks
+        clearSAMClicks();
+      } else {
+        // Redraw original image
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(currentImage, 0, 0);
+        
+        // Clear mask canvas and points
+        maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+        clickPoints = [];
+        
+        showStatus('Mask cleared. Start over!', 'info');
+        setTimeout(hideStatus, 2000);
+      }
     });
 
     // Process image
@@ -966,6 +1012,13 @@
     
     // Remove object button
     removeBtn.addEventListener('click', async () => {
+      // Check if we're in SAM mode or regular mode
+      if (mode === 'sam') {
+        // SAM mode - use SAM process endpoint
+        processSAMAndRemove();
+        return;
+      }
+      
       if (!lastUploadResult) {
         showStatus('Please process an image first.', 'error');
         return;
@@ -974,7 +1027,7 @@
       try {
         // Show inpainting loader
         inpaintingLoader.classList.add('show');
-        showStatus('🎨 Removing object with Flux Kontext...', 'info');
+        showStatus('🎨 Removing object with LaMa...', 'info');
         removeBtn.disabled = true;
         
         // Determine object name
@@ -1050,6 +1103,230 @@
         removeBtn.disabled = false;
       }
     });
+    
+    // SAM Interactive Functions
+    async function uploadToSAM() {
+      if (!currentImage) return;
+      
+      try {
+        showStatus('Uploading to SAM...', 'info');
+        
+        const response = await fetch('/sam/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            image: currentImage.src,
+            session_id: samSessionId
+          })
+        });
+        
+        if (!response.ok) throw new Error('SAM upload failed');
+        
+        const result = await response.json();
+        console.log('SAM upload successful:', result);
+        showStatus('SAM ready! Click on objects to segment.', 'success');
+        setTimeout(hideStatus, 2000);
+      } catch (error) {
+        console.error('SAM upload error:', error);
+        showStatus('Error uploading to SAM: ' + error.message, 'error');
+      }
+    }
+    
+    async function addSAMPoint(x, y, isPositive = true) {
+      try {
+        const response = await fetch('/sam/add_point', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: samSessionId,
+            x: x,
+            y: y,
+            is_positive: isPositive
+          })
+        });
+        
+        if (!response.ok) throw new Error('SAM point add failed');
+        
+        const result = await response.json();
+        
+        // Display the painted image with mask
+        if (result.painted_image) {
+          const img = new Image();
+          img.onload = () => {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0);
+          };
+          img.src = result.painted_image;
+        }
+        
+        showStatus('Point added! Click more or Add Mask to save.', 'success');
+      } catch (error) {
+        console.error('SAM point error:', error);
+        showStatus('Error adding point: ' + error.message, 'error');
+      }
+    }
+    
+    async function clearSAMClicks() {
+      try {
+        const response = await fetch('/sam/clear_clicks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: samSessionId })
+        });
+        
+        if (!response.ok) throw new Error('SAM clear failed');
+        
+        const result = await response.json();
+        
+        // Display original image
+        if (result.image) {
+          const img = new Image();
+          img.onload = () => {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0);
+          };
+          img.src = result.image;
+        }
+        
+        showStatus('Clicks cleared!', 'info');
+        setTimeout(hideStatus, 2000);
+      } catch (error) {
+        console.error('SAM clear error:', error);
+        showStatus('Error clearing: ' + error.message, 'error');
+      }
+    }
+    
+    // Add Mask button
+    addMaskBtn.addEventListener('click', async () => {
+      try {
+        const response = await fetch('/sam/add_mask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: samSessionId })
+        });
+        
+        if (!response.ok) throw new Error('SAM add mask failed');
+        
+        const result = await response.json();
+        samMasks = result.mask_names || [];
+        
+        // Display image with all masks
+        if (result.image) {
+          const img = new Image();
+          img.onload = () => {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0);
+          };
+          img.src = result.image;
+        }
+        
+        showStatus(`Mask added! Total masks: ${samMasks.length}`, 'success');
+      } catch (error) {
+        console.error('SAM add mask error:', error);
+        showStatus('Error adding mask: ' + error.message, 'error');
+      }
+    });
+    
+    // Delete Masks button
+    deleteMasksBtn.addEventListener('click', async () => {
+      try {
+        const response = await fetch('/sam/delete_masks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: samSessionId })
+        });
+        
+        if (!response.ok) throw new Error('SAM delete masks failed');
+        
+        const result = await response.json();
+        samMasks = [];
+        
+        // Display original image
+        if (result.image) {
+          const img = new Image();
+          img.onload = () => {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0);
+          };
+          img.src = result.image;
+        }
+        
+        showStatus('All masks deleted!', 'info');
+        setTimeout(hideStatus, 2000);
+      } catch (error) {
+        console.error('SAM delete masks error:', error);
+        showStatus('Error deleting masks: ' + error.message, 'error');
+      }
+    });
+    
+    // Process SAM masks and remove objects
+    async function processSAMAndRemove() {
+      try {
+        if (samMasks.length === 0) {
+          showStatus('Please add at least one mask first.', 'error');
+          return;
+        }
+        
+        // Show inpainting loader
+        inpaintingLoader.classList.add('show');
+        showStatus('🎨 Processing SAM masks with LaMa...', 'info');
+        removeBtn.disabled = true;
+        
+        const response = await fetch('/sam/process', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: samSessionId,
+            num_inference_steps: 20,
+            guidance_scale: 2.5,
+            seed: 300000
+          })
+        });
+        
+        // Hide inpainting loader
+        inpaintingLoader.classList.remove('show');
+        
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.detail || 'Processing failed');
+        }
+        
+        const result = await response.json();
+        console.log('SAM processing successful:', result);
+        
+        // Display the result
+        if (result.output_url) {
+          const imageUrl = result.output_url + '?t=' + Date.now();
+          
+          // Hide placeholder, show image
+          resultPlaceholder.style.display = 'none';
+          resultImage.style.display = 'block';
+          resultImage.src = imageUrl;
+          resultImage.classList.add('result-ready');
+          
+          resultImage.onload = () => {
+            console.log('✅ Result image loaded successfully!');
+          };
+          resultImage.onerror = (e) => {
+            console.error('❌ Failed to load result image:', e);
+            showStatus('Error: Failed to load result image', 'error');
+          };
+          
+          const maskText = result.num_masks > 1 ? `${result.num_masks} masks` : '1 mask';
+          showStatus(`✅ Objects removed successfully! (${maskText}) Time: ${result.inference_time?.toFixed(1)}s`, 'success');
+        } else {
+          console.error('No output_url in result');
+        }
+        
+        removeBtn.disabled = false;
+        
+      } catch (error) {
+        inpaintingLoader.classList.remove('show');
+        console.error('Error:', error);
+        showStatus(`❌ Error: ${error.message}`, 'error');
+        removeBtn.disabled = false;
+      }
+    }
     
     // Initialize canvas as hidden
     canvas.style.display = 'none';
